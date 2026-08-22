@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  # schedule:
+    # - cron: '0 17 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: loong64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: actions/cache@v6
+        with:
+          path: ./out/sysroot-build/trixie/debian-packages
+          key: ${{ runner.os }}-debian-trixie_${{ matrix.arch }}-${{ github.run_id }}
+          restore-keys: ${{ runner.os }}-debian-trixie_${{ matrix.arch }}-
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install gcc-loongarch64-linux-gnu -y
+
+      - name: Build
+        run: |
+          uv run --with requests build/linux/sysroot_scripts/sysroot_creator.py build ${{ matrix.arch }}
+
+          mkdir -p dist
+          tarball="dist/debian_trixie_${{ matrix.arch }}_sysroot.tar.xz"
+          mv out/sysroot-build/trixie/debian_trixie_*.tar.xz dist
+          sha256sum=$(sha256sum "${tarball}" | awk '{print $1}')
+          mv "${tarball}" "dist/${sha256sum}"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: debian-trixie-${{ matrix.arch }}-sysroot
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: sysroot
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Download Artifact
+        uses: actions/download-artifact@v8
+        with:
+          pattern: debian-*
+          merge-multiple: true
+
+      - name: Commit published
+        run: |
+          serial=$(date "+%Y%m%d")
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "feat: update ${serial}"
+          git push origin HEAD:sysroot
